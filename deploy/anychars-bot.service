@@ -1,0 +1,16 @@
+[Unit]
+Description=Anychars AI Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tgbot
+WorkingDirectory=/opt/anychars-bot
+ExecStart=/opt/anychars-bot/.venv/bin/python /opt/anychars-bot/bot.py
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
