@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ChatAction
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
@@ -21,6 +22,8 @@ OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 HISTORY_LIMIT = int(os.getenv("HISTORY_LIMIT", "20"))
 MAX_MESSAGE_LEN = 4000
+TELEGRAM_PROXY_URL = os.getenv("TELEGRAM_PROXY_URL", "").strip() or None
+OPENAI_PROXY_URL = os.getenv("OPENAI_PROXY_URL", "").strip() or None
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "bot.db"
@@ -31,9 +34,24 @@ logging.basicConfig(
 )
 log = logging.getLogger("anychars-bot")
 
-bot = Bot(BOT_TOKEN)
+bot = Bot(BOT_TOKEN, session=AiohttpSession(proxy=TELEGRAM_PROXY_URL))
 dp = Dispatcher()
-client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+
+openai_kwargs = {"api_key": OPENAI_API_KEY}
+if OPENAI_PROXY_URL:
+    try:
+        from openai import AsyncOpenAI as _AO  # noqa: F401
+        from httpx import AsyncClient
+
+        from httpx_socks import AsyncProxyTransport
+
+        openai_kwargs["http_client"] = AsyncClient(
+            transport=AsyncProxyTransport.from_url(OPENAI_PROXY_URL)
+        )
+    except Exception:
+        log = logging.getLogger("anychars-bot")
+        log.warning("OpenAI proxy configured but httpx-socks unavailable, ignoring")
+client = AsyncOpenAI(**openai_kwargs)
 
 PRESET_CHARACTERS = [
     {
