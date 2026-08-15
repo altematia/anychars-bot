@@ -58,6 +58,8 @@ if TELEGRAM_PROXY_URL:
 
 client = TelegramClient(StringSession(SESSION_STRING), **client_kwargs)
 
+_wake_event: asyncio.Event | None = None
+
 openai_kwargs = {"api_key": OPENAI_API_KEY}
 if OPENAI_PROXY_URL:
     try:
@@ -249,6 +251,7 @@ async def _keep_typing(peer, stop_event: asyncio.Event) -> None:
             await client(functions.messages.SetTypingRequest(
                 peer=peer, action=types.SendMessageTypingAction()
             ))
+            await client.send_read_acknowledge(peer)
         except Exception:
             log.exception("typing failed")
         await asyncio.sleep(4)
@@ -269,6 +272,16 @@ async def on_message(e) -> None:
     user_id = e.sender_id
     text = e.message.text.strip()
     touch_contact(user_id, "in")
+    _wake_ame()
+    try:
+        await client(functions.account.UpdateStatusRequest(offline=False))
+    except Exception:
+        log.exception("wake status failed")
+
+    try:
+        await client.send_read_acknowledge(e.chat_id, max_id=e.message.id)
+    except Exception:
+        log.exception("read ack failed")
 
     if text in ("/start", "/reset"):
         clear_history(user_id)
@@ -318,12 +331,40 @@ async def on_message(e) -> None:
 
 
 async def keep_online() -> None:
+    global _wake_event
+    _wake_event = asyncio.Event()
+    wake = _wake_event
     while True:
+        online_for = random.randint(30, 120) * 60
+        end = time.time() + online_for
+        while time.time() < end:
+            try:
+                await client(functions.account.UpdateStatusRequest(offline=False))
+            except Exception:
+                log.exception("status update failed")
+            await asyncio.sleep(60)
+
+        offline_for = random.randint(5, 45) * 60
+        try:
+            await client(functions.account.UpdateStatusRequest(offline=True))
+        except Exception:
+            log.exception("status offline failed")
+        log.info("going offline for %s min", offline_for // 60)
+        wake.clear()
+        try:
+            await asyncio.wait_for(wake.wait(), timeout=offline_for)
+        except asyncio.TimeoutError:
+            pass
         try:
             await client(functions.account.UpdateStatusRequest(offline=False))
         except Exception:
-            log.exception("status update failed")
-        await asyncio.sleep(60)
+            log.exception("status wake failed")
+        log.info("woke up")
+
+
+def _wake_ame() -> None:
+    if _wake_event is not None:
+        _wake_event.set()
 
 
 async def spontaneous_loop() -> None:
