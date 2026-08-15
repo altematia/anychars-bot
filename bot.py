@@ -9,7 +9,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ChatAction
 from aiogram.filters import Command, CommandStart
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import Message
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
@@ -71,6 +71,10 @@ SYSTEM_PROMPT = """Ты — Аме-чан, милая интернет-дево�
 
 def init_db() -> None:
     with sqlite3.connect(DB_PATH) as con:
+        cur = con.execute("PRAGMA table_info(messages)")
+        cols = [row[1] for row in cur.fetchall()]
+        if cols and cols != ["user_id", "role", "content", "ts"]:
+            con.execute("DROP TABLE messages")
         con.execute(
             "CREATE TABLE IF NOT EXISTS messages ("
             "user_id INTEGER, role TEXT, content TEXT, ts REAL)"
@@ -105,14 +109,6 @@ def clear_history(user_id: int) -> None:
         con.execute("DELETE FROM messages WHERE user_id = ?", (user_id,))
 
 
-def main_menu() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🔄 Сбросить диалог", callback_data="reset")],
-        ]
-    )
-
-
 @dp.message(CommandStart(), F.chat.type == "private")
 async def on_start(m: Message) -> None:
     if m.from_user:
@@ -120,31 +116,24 @@ async def on_start(m: Message) -> None:
     await m.answer(
         "хяяя~ P!! ты написал мне!! (⁠≧⁠▽⁠≦⁠)\n"
         "я аме-чан, и я так рада, что ты тут! правда-правда!\n"
-        "расскажи, как прошёл твой день? ммм... у тебя был обед?",
-        reply_markup=main_menu(),
+        "расскажи, как прошёл твой день? ммм... у тебя был обед?"
     )
-
-
-@dp.callback_query(F.data == "reset")
-async def cb_reset(c) -> None:
-    if c.from_user:
-        clear_history(c.from_user.id)
-    await c.message.edit_text(
-        "ну всё, я всё забыла~ начинаем с чистого листа! ✨\n"
-        "о чём поболтаем, P?",
-        reply_markup=main_menu(),
-    )
-    await c.answer()
 
 
 @dp.message(Command("reset"), F.chat.type == "private")
 async def cmd_reset(m: Message) -> None:
     if m.from_user:
         clear_history(m.from_user.id)
-    await m.answer(
-        "ну всё, я всё забыла~ начинаем с чистого листа! ✨",
-        reply_markup=main_menu(),
-    )
+    await m.answer("ну всё, я всё забыла~ начинаем с чистого листа! ✨")
+
+
+async def _keep_typing(chat_id: int, stop_event: asyncio.Event) -> None:
+    while not stop_event.is_set():
+        try:
+            await bot.send_chat_action(chat_id, ChatAction.TYPING)
+        except Exception:
+            log.exception("TYPING send failed")
+        await asyncio.sleep(4)
 
 
 @dp.message(F.text, F.chat.type == "private")
@@ -154,10 +143,14 @@ async def on_text(m: Message) -> None:
     user_id = m.from_user.id
     add_message(user_id, "user", m.text)
 
-    await bot.send_chat_action(m.chat.id, ChatAction.TYPING)
+    stop_typing = asyncio.Event()
+    typing_task = asyncio.create_task(_keep_typing(m.chat.id, stop_typing))
 
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}, *get_history(user_id)]
     try:
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            *get_history(user_id),
+        ]
         resp = await client.chat.completions.create(
             model=OPENAI_MODEL,
             messages=messages,
@@ -171,6 +164,9 @@ async def on_text(m: Message) -> None:
     except Exception:
         log.exception("OpenAI error")
         reply = "ой-ой, у меня всё залагало! подожди чуть-чуть и напиши снова (⁠｡⁠•́⁠︿⁠•̀⁠｡⁠)"
+    finally:
+        stop_typing.set()
+        await typing_task
 
     add_message(user_id, "assistant", reply)
 
