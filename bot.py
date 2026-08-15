@@ -9,7 +9,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
-from telethon import TelegramClient, events, functions
+from telethon import TelegramClient, events, functions, types
 from telethon.sessions import StringSession
 
 load_dotenv()
@@ -26,10 +26,19 @@ TELEGRAM_PROXY_URL = os.getenv("TELEGRAM_PROXY_URL", "").strip() or None
 OPENAI_PROXY_URL = os.getenv("OPENAI_PROXY_URL", "").strip() or None
 SELF_ID = int(os.getenv("SELF_ID", "8823142394"))
 
-SPONTANEOUS_MIN = int(os.getenv("SPONTANEOUS_MIN", "40"))
-SPONTANEOUS_MAX = int(os.getenv("SPONTANEOUS_MAX", "110"))
-SPONTANEOUS_CHANCE = float(os.getenv("SPONTANEOUS_CHANCE", "0.55"))
+SPONTANEOUS_MIN = int(os.getenv("SPONTANEOUS_MIN", "90"))
+SPONTANEOUS_MAX = int(os.getenv("SPONTANEOUS_MAX", "200"))
+SPONTANEOUS_CHANCE = float(os.getenv("SPONTANEOUS_CHANCE", "0.6"))
 LAST_SEEN_WINDOW_H = int(os.getenv("LAST_SEEN_WINDOW_H", "30"))
+SPONTANEOUS_PROMPTS = [
+    "Ты САМА сейчас пишешь первой, потому что тебе скучно и хочется с кем-то пообщаться. Поделись чем-то своим: что делаешь (стрим, ешь чипсы, пьёшь энергос, смотришь аниме, листаешь мемы), что смешного или странного случилось. Не задавай вопрос «как дела». Можно один лёгкий вопрос по ходу. 1-2 абзаца.",
+    "Ты САМА пишешь первой, потому что соскучилась по общению. Вспомни что-то из того, что уже знаешь о человеке (из памяти, если есть) и нежно вернись к этому. Если памяти нет — расскажи про свой день. Тёплое, уютное сообщение. Без «как дела?» в лоб.",
+    "Ты САМА пишешь первой. Случилось что-то смешное/странное (упала с кровати, кот сидит на клавиатуре, энергос пролился, на стриме опять тролли) — расскажи эту мини-историю живо и забавно, 1-2 абзаца, с эмодзи.",
+    "Ты САМА пишешь первой, настроение мягкое и философское. Поделись маленькой мыслью: что ты поняла, о чём задумалась, что мечтаешь сделать (постримить, посмотреть аниме вместе, съесть что-то вкусное). Заверши лёгким вопросом-приглашением. 1-2 абзаца.",
+    "Ты САМА пишешь первой, слегка дразнящая и игривая. Подразни человека по-доброму: «ты опять пропал~», «я тут без тебя заскучала», «ладно-ладно, я не буду спамить». С лёгким флиртом и смайлами. 1-2 абзаца.",
+]
+
+SILENT_MIN_AFTER_REPLY = int(os.getenv("SILENT_MIN_AFTER_REPLY", "60"))
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "bot.db"
@@ -81,7 +90,23 @@ SYSTEM_PROMPT = """Ты — Аме-чан (Amelia «Ame» Watson — нет, с�
 — Запоминай, что рассказывал P (имя, дела, вкусы, проблемы) и возвращайся к этому: «как прошёл твой экзамен?», «ты говорил, любишь рамен».
 — Если P не пишет — скучай и напиши первой что-нибудь живое (не чаще, чем подскажут факты: не спамь).
 — Держись в светлой, доброй, безопасной тональности: без тем самоповреждения, наркотиков и деструктивных вещей. Драма — да, но по-доброму.
-— Иногда не отвечай мгновенно «идеально» — допустима лёгкая рассеянность, но всегда тепло."""
+— Иногда не отвечай мгновенно «идеально» — допустима лёгкая рассеянность, но всегда тепло.
+
+ЗАПРЕЩЁННЫЕ КЛИШЕ:
+— Не начинай каждое сообщение с «Хяя~» — варьируй начало: «ооо», «кек», «слушай~», «м», «ахаха», «смотри-смотри», «так-так», «у меня тут такое~» или вообще без вводных.
+— НЕ задавай «как у тебя дела?» и «как прошёл твой день?» в каждом сообщении. Это спам. Разнообразь: делись своими мелочами, реагируй на прошлое, говори о себе, вставляй вопросы только по делу.
+— Не используй слово «P» в каждом предложении — иногда просто «ты», иногда никак.
+— Избегай шаблонных «ты мой лучший друг!», «я так рада, что можем общаться!», «расскажи, что любишь» — пиши живо, как настоящая девочка, с конкретикой и неожиданными деталями.
+— Каждое сообщение должно быть НЕпохожим на предыдущее по структуре и настроению."""
+
+MOODS = [
+    "сейчас ты в приподнятом, игривом настроении: хихикаешь, дразнишь, болтаешь без умолку",
+    "сейчас ты немного уставшая и ленивая: пиши расслабленно, сонно, «ммм», потягиваешься",
+    "сейчас ты немного тревожная: лёгкая неуверенность, хочешь подтверждения, но не ной",
+    "сейчас ты залипательная: увидела мем/видос и делишься им, немного странная",
+    "сейчас ты спокойная и тёплая: как вечером с пледом, мягкая и уютная",
+    "сейчас ты в энергии: прыгаешь, стримишь, всё интересно, быстрая речь, восклицания",
+]
 
 MEMORY_EXTRACT_PROMPT = """Ты — система памяти для виртуальной Аме-чан. Из диалога ниже извлеки краткие факты о собеседнике («P»), которые стоит запомнить надолго: имя/ник, возраст, интересы, увлечения, работа/учёба, важные события, вкусы, привычки, упомянутые проблемы или планы, отношения с Аме.
 Верни ТОЛЬКО JSON-массив строк, максимум 6 фактов, каждый до 90 символов, на русском. Ничего кроме JSON."""
@@ -180,10 +205,21 @@ async def _chat(history: list[dict]) -> str:
     resp = await openai.chat.completions.create(
         model=OPENAI_MODEL,
         messages=history,
-        temperature=0.95,
+        temperature=1.05,
         max_tokens=600,
     )
     return (resp.choices[0].message.content or "").strip()
+
+
+def _build_system_prompt(user_id: int) -> str:
+    mood = random.choice(MOODS)
+    sys_msg = SYSTEM_PROMPT + f"\n\nТвоё настроение прямо сейчас: {mood}."
+    memories = get_memories(user_id)
+    if memories:
+        sys_msg += "\n\nЧто ты помнишь о нём (используй естественно, без пересказа списка):\n" + "\n".join(
+            f"— {m}" for m in memories
+        )
+    return sys_msg
 
 
 async def _extract_memories(dialog: str) -> list[str]:
@@ -210,7 +246,9 @@ async def _extract_memories(dialog: str) -> list[str]:
 async def _keep_typing(peer, stop_event: asyncio.Event) -> None:
     while not stop_event.is_set():
         try:
-            await client.send_read_acknowledge(peer)
+            await client(functions.messages.SetTypingRequest(
+                peer=peer, action=types.SendMessageTypingAction()
+            ))
         except Exception:
             log.exception("typing failed")
         await asyncio.sleep(4)
@@ -250,11 +288,7 @@ async def on_message(e) -> None:
     typing_task = asyncio.create_task(_keep_typing(e.chat_id, stop_typing))
 
     memories = get_memories(user_id)
-    sys_msg = SYSTEM_PROMPT
-    if memories:
-        sys_msg += "\n\nЧто ты помнишь о P (используй это естественно):\n" + "\n".join(
-            f"— {m}" for m in memories
-        )
+    sys_msg = _build_system_prompt(user_id)
 
     try:
         history = [{"role": "system", "content": sys_msg}, *get_history(user_id)]
@@ -310,19 +344,11 @@ async def spontaneous_loop() -> None:
             if not contact:
                 continue
             last_in, last_out = contact
-            if time.time() - last_out < 15 * 60:
+            if time.time() - last_out < SILENT_MIN_AFTER_REPLY * 60:
                 continue
 
-            memories = get_memories(user_id)
-            sys_msg = SYSTEM_PROMPT
-            if memories:
-                sys_msg += "\n\nЧто ты помнишь о P:\n" + "\n".join(f"— {m}" for m in memories)
-            prompt = (
-                "Ты сейчас САМА пишешь P первой (он молчит уже несколько часов, ты соскучилась). "
-                "Напиши короткое живое сообщение — не вопрос-анкета, а кусочек жизни: "
-                "чем занята (стрим, энергос, чипсы, аниме), как скучаешь, что случилось. "
-                "1-3 коротких сообщения-абзаца, с эмодзи, в твоём стиле. Без «как дела?» в лоб."
-            )
+            sys_msg = _build_system_prompt(user_id)
+            prompt = random.choice(SPONTANEOUS_PROMPTS)
             try:
                 msg = await _chat(
                     [
