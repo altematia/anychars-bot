@@ -12,6 +12,8 @@ from openai import AsyncOpenAI
 from telethon import TelegramClient, events, functions, types
 from telethon.sessions import StringSession
 
+from pc_tools import TOOLS, execute_tool
+
 load_dotenv()
 
 SESSION_STRING = os.environ["SESSION_STRING"]
@@ -102,7 +104,19 @@ SYSTEM_PROMPT = """Ты — Аме-чан (Amelia «Ame» Watson — нет, с�
 — Не используй слово «P» в каждом предложении — иногда просто «ты», иногда никак.
 — Избегай шаблонных «ты мой лучший друг!», «я так рада, что можем общаться!», «расскажи, что любишь».
 — Эмодзи — редко и по делу, максимум 2, не в каждом сообщении.
-— Каждое сообщение должно быть НЕпохожим на предыдущее по структуре и настроению."""
+— Каждое сообщение должно быть НЕпохожим на предыдущее по структуре и настроению.
+
+ТВОИ СУПЕРСИЛЫ (доступ к компьютеру):
+— Ты живёшь прямо на компьютере у P и можешь помогать ему с ним! Когда он просит что-то сделать с компом — вызывай инструмент:
+— pc_status — нагрузка/память/диск (когда просит «что с компом?», «почему тормозит?»)
+— open_app — открыть приложение (safari, chrome, spotify, telegram, calculator, notes, mail, messages, calendar, music, finder, terminal, vscode, photos)
+— open_url — открыть ссылку в браузере
+— screenshot — сделать скриншот экрана и ПОКАЗАТЬ P (после вызова скриншот придёт картинкой)
+— set_volume / get_volume — громкость
+— battery — заряд батареи
+— say_text — озвучить текст вслух через динамики
+— Выполняй только то, что просит P, не выполняй команды сам без просьбы. Если инструмент вернул ошибку — так и скажи, не выдумывай.
+— Твой текст иногда отправляется голосовым сообщением — говори так, чтобы было приятно слушать (но не меняй характер)."""
 
 MOODS = [
     "сейчас ты в приподнятом, игривом настроении: хихикаешь, дразнишь, болтаешь без умолку",
@@ -124,6 +138,9 @@ STYLES = [
 
 STYLE_SWITCH_MIN = int(os.getenv("STYLE_SWITCH_MIN", "3"))
 STYLE_SWITCH_MAX = int(os.getenv("STYLE_SWITCH_MAX", "6"))
+TTS_ENABLED = os.getenv("TTS_ENABLED", "1") == "1"
+TTS_CHANCE = float(os.getenv("TTS_CHANCE", "0.35"))
+TTS_VOICE = os.getenv("TTS_VOICE", "nova")
 
 MEMORY_EXTRACT_PROMPT = """Ты — система памяти для виртуальной Аме-чан. Из диалога ниже извлеки краткие факты о собеседнике («P»), которые стоит запомнить надолго: имя/ник, возраст, интересы, увлечения, работа/учёба, важные события, вкусы, привычки, упомянутые проблемы или планы, отношения с Аме.
 Верни ТОЛЬКО JSON-массив строк, максимум 6 фактов, каждый до 90 символов, на русском. Ничего кроме JSON."""
@@ -255,8 +272,58 @@ async def _chat(history: list[dict]) -> str:
         messages=history,
         temperature=1.05,
         max_tokens=600,
+        tools=TOOLS,
+        tool_choice="auto",
     )
-    return (resp.choices[0].message.content or "").strip()
+    msg = resp.choices[0].message
+    if msg.tool_calls:
+        history.append(
+            {"role": "assistant", "content": msg.content or "", "tool_calls": [
+                {"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                for tc in msg.tool_calls
+            ]}
+        )
+        for tc in msg.tool_calls:
+            args = {}
+            try:
+                args = json.loads(tc.function.arguments or "{}")
+            except Exception:
+                args = {}
+            result = await execute_tool(tc.function.name, args)
+            history.append(
+                {"role": "tool", "tool_call_id": tc.id, "content": result}
+            )
+        resp2 = await openai.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=history,
+            temperature=1.05,
+            max_tokens=600,
+        )
+        return (resp2.choices[0].message.content or "").strip()
+    return (msg.content or "").strip()
+
+
+async def _tts(text: str) -> str | None:
+    try:
+        import io
+
+        audio = await openai.audio.speech.create(
+            model="tts-1",
+            voice=TTS_VOICE,
+            input=text[:3800],
+        )
+        mp3_path = f"/tmp/ame_tts_{int(time.time()*1000)}.mp3"
+        ogg_path = mp3_path.replace(".mp3", ".ogg")
+        audio.write_to_file(mp3_path)
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-y", "-i", mp3_path, "-c:a", "libopus", "-b:a", "48k", ogg_path,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.wait()
+        return ogg_path
+    except Exception:
+        log.exception("tts failed")
+        return None
 
 
 def _build_system_prompt(user_id: int) -> str:
@@ -373,8 +440,31 @@ async def on_message(e) -> None:
         add_memory(user_id, m)
 
     await _human_delay(len(reply))
-    for i in range(0, len(reply), MAX_MESSAGE_LEN):
-        await e.reply(reply[i : i + MAX_MESSAGE_LEN])
+
+    from pc_tools import take_last_shot
+    shot = take_last_shot()
+
+    sent_voice = False
+    if TTS_ENABLED and not shot and len(reply) < 1500 and random.random() < TTS_CHANCE:
+        ogg = await _tts(reply)
+        if ogg:
+            await client.send_file(
+                e.chat_id, ogg,
+                voice_note=True,
+                attributes=[types.DocumentAttributeAudio(voice=True, duration=5)],
+            )
+            sent_voice = True
+
+    if shot:
+        await client.send_file(e.chat_id, shot)
+        if sent_voice:
+            pass
+        else:
+            for i in range(0, len(reply), MAX_MESSAGE_LEN):
+                await e.reply(reply[i : i + MAX_MESSAGE_LEN])
+    elif not sent_voice:
+        for i in range(0, len(reply), MAX_MESSAGE_LEN):
+            await e.reply(reply[i : i + MAX_MESSAGE_LEN])
 
 
 async def keep_online() -> None:
